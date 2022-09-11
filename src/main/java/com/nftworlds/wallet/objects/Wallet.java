@@ -1,5 +1,7 @@
 package com.nftworlds.wallet.objects;
 
+import com.google.gson.Gson;
+import com.google.gson.JsonParser;
 import com.nftworlds.wallet.NFTWorlds;
 import com.nftworlds.wallet.contracts.wrappers.common.ERC20;
 import com.nftworlds.wallet.contracts.wrappers.common.ERC721;
@@ -10,21 +12,20 @@ import com.nftworlds.wallet.objects.payments.PeerToPeerPayment;
 import com.nftworlds.wallet.qrmaps.LinkUtils;
 import com.nftworlds.wallet.qrmaps.QRMapManager;
 import com.nftworlds.wallet.util.ColorUtil;
+import com.nimbusds.jose.shaded.json.JSONObject;
 import lombok.Getter;
 import lombok.Setter;
-import net.md_5.bungee.api.ChatMessageType;
-import net.md_5.bungee.api.chat.TextComponent;
 import org.bukkit.Bukkit;
 import org.bukkit.Material;
+import org.bukkit.OfflinePlayer;
 import org.bukkit.entity.Player;
 import org.bukkit.inventory.ItemStack;
 import org.bukkit.inventory.meta.MapMeta;
 import org.bukkit.map.MapView;
 import org.jetbrains.annotations.NotNull;
-import org.json.HTTP;
-import org.json.JSONObject;
 import org.web3j.abi.datatypes.generated.Uint256;
 import org.web3j.crypto.Credentials;
+import org.web3j.protocol.core.methods.response.TransactionReceipt;
 import org.web3j.tx.gas.DefaultGasProvider;
 import org.web3j.utils.Convert;
 
@@ -39,10 +40,7 @@ import java.net.http.HttpResponse;
 import java.text.MessageFormat;
 import java.time.Instant;
 import java.time.temporal.ChronoUnit;
-import java.util.HashMap;
-import java.util.Objects;
-import java.util.Random;
-import java.util.UUID;
+import java.util.*;
 
 public class Wallet {
 
@@ -107,6 +105,10 @@ public class Wallet {
         NFTWorlds.getInstance().addWallet(this);
     }
 
+    private static JSONObject JSONObject(String string){
+        return new JSONObject(new Gson().fromJson(JsonParser.parseString(string), HashMap.class));
+    }
+
     /**
      * Get the wallet's WRLD balance
      */
@@ -160,7 +162,7 @@ public class Wallet {
         HttpRequest request = HttpRequest.newBuilder()
                 .uri(new URI(url)).header("X-API-KEY", "worldql_sk_ssga6syqc1eo5eyn")
                 .build();
-        return new JSONObject(client.send(request, HttpResponse.BodyHandlers.ofString()).body());
+        return JSONObject(client.send(request, HttpResponse.BodyHandlers.ofString()).body());
     }
 
     /**
@@ -177,7 +179,7 @@ public class Wallet {
             return null;
         }
         String url = baseURL + "/getNFTs?owner=" + address + "&withMetadata=false";
-        return new JSONObject(HttpClient.newHttpClient().send(HttpRequest.newBuilder().uri(URI.create(url)).build(), HttpResponse.BodyHandlers.ofString()).body());
+        return JSONObject(HttpClient.newHttpClient().send(HttpRequest.newBuilder().uri(URI.create(url)).build(), HttpResponse.BodyHandlers.ofString()).body());
     }
 
     /**
@@ -193,7 +195,7 @@ public class Wallet {
             return null;
         }
         String url = baseURL + "/getNFTs?owner=" + address + "&contractAddresses[]=" + contractAddress;
-        return new JSONObject(HttpClient.newHttpClient().send(HttpRequest.newBuilder().uri(URI.create(url)).build(), HttpResponse.BodyHandlers.ofString()).body());
+        return JSONObject(HttpClient.newHttpClient().send(HttpRequest.newBuilder().uri(URI.create(url)).build(), HttpResponse.BodyHandlers.ofString()).body());
     }
 
     public boolean doesPlayerOwnNFTInCollection(Network network, String contractAddress) {
@@ -311,8 +313,8 @@ public class Wallet {
                 .POST(HttpRequest.BodyPublishers.ofString(requestBody))
                 .build();
         try {
-            JSONObject response = new JSONObject(HttpClient.newHttpClient().send(request, HttpResponse.BodyHandlers.ofString()).body());
-            final String receiptLink = "https://app.economykit.com/hotwallet/transaction/" + response.getInt("outgoing_tx_id");
+            JSONObject response = JSONObject(HttpClient.newHttpClient().send(request, HttpResponse.BodyHandlers.ofString()).body());
+            final String receiptLink = "https://app.economykit.com/hotwallet/transaction/" + response.get("outgoing_tx_id");
             Bukkit.getScheduler().runTaskAsynchronously(NFTWorlds.getInstance(), () -> {
                 if (paidPlayer != null) {
                     paidPlayer.sendMessage(ColorUtil.rgb(
@@ -328,7 +330,58 @@ public class Wallet {
         return true;
     }
 
+    /**
+     * Deposit WRLD into this wallet. Sync method
+     *
+     * @param amount
+     * @param network
+     * @param reason
+     * @return The result of the transaction or {@code null}
+     */
+    public AsyncPlayerPaidFromServerWalletEvent payWRLDSync(@NotNull double amount, @NotNull Network network, @NotNull String reason) {
+        if (!network.equals(Network.POLYGON)) {
+            NFTWorlds.getInstance().getLogger().warning("Attempted to call Wallet.payWRLDSync with unsupported network. " +
+                                                        "Only Polygon is supported in this plugin at the moment.");
+            return null;
+        }
 
+        BigDecimal    sending    = Convert.toWei(BigDecimal.valueOf(amount), Convert.Unit.ETHER);
+        OfflinePlayer paidPlayer = Bukkit.getOfflinePlayer(owner.getUuid());
+
+        if (NFTWorlds.getInstance().getNftConfig().isUseHotwalletForOutgoingTransactions()) {
+            // TODO: Add support for other outgoing currencies through Hotwallet.
+            JSONObject json = new JSONObject();
+            json.put("network", "Polygon");
+            json.put("token", "POLYGON_WRLD");
+            json.put("recipient_address", this.getAddress());
+            json.put("amount", sending.toBigInteger());
+            String requestBody = json.toString();
+            HttpRequest request = HttpRequest.newBuilder()
+                                             .uri(URI.create(NFTWorlds.getInstance().getNftConfig().getHotwalletHttpsEndpoint() + "/send_tokens"))
+                                             .POST(HttpRequest.BodyPublishers.ofString(requestBody))
+                                             .build();
+            try {
+                JSONObject response = JSONObject(HttpClient.newHttpClient().send(request, HttpResponse.BodyHandlers.ofString()).body());
+                final String receiptLink = "https://app.economykit.com/hotwallet/transaction/" + response.get("outgoing_tx_id");
+                return new AsyncPlayerPaidFromServerWalletEvent(null, amount, network, reason, receiptLink);
+            } catch (IOException | InterruptedException e) {
+                e.printStackTrace();
+                return null;
+            }
+        } else {
+            try {
+                NFTWorlds.getInstance().getLogger().info("Sending outgoing transaction using PK to " + paidPlayer.getName() + " for " + amount);
+                final PolygonWRLDToken polygonWRLDTokenContract = NFTWorlds.getInstance().getWrld().getPolygonWRLDTokenContract();
+                TransactionReceipt receipt = polygonWRLDTokenContract.transfer(this.getAddress(), sending.toBigInteger()).sendAsync().join();
+                final String receiptLink = "https://polygonscan.com/tx/" + receipt.getTransactionHash();
+                return new AsyncPlayerPaidFromServerWalletEvent(null, amount, network, reason, receiptLink);
+            } catch (Exception e) {
+                NFTWorlds.getInstance().getLogger().warning("caught error in payWrldSync:");
+                e.printStackTrace();
+                return null;
+            }
+        }
+    }
     /**
      * Deposit WRLD into this wallet
      *
@@ -364,8 +417,8 @@ public class Wallet {
                     .POST(HttpRequest.BodyPublishers.ofString(requestBody))
                     .build();
             try {
-                JSONObject response = new JSONObject(HttpClient.newHttpClient().send(request, HttpResponse.BodyHandlers.ofString()).body());
-                final String receiptLink = "https://app.economykit.com/hotwallet/transaction/" + response.getInt("outgoing_tx_id");
+                JSONObject response = JSONObject(HttpClient.newHttpClient().send(request, HttpResponse.BodyHandlers.ofString()).body());
+                final String receiptLink = "https://app.economykit.com/hotwallet/transaction/" + response.get("outgoing_tx_id");
                 Bukkit.getScheduler().runTaskAsynchronously(NFTWorlds.getInstance(), () -> {
                     postPaymentEvent(amount, network, reason, paidPlayer, receiptLink);
                 });

@@ -4,7 +4,7 @@
   <groupId>com.nftworlds</groupId>
   <artifactId>wrld-payments-api</artifactId>
   <name>wrld-payments-api</name>
-  <version>0.3.2</version>
+  <version>0.3.3-sync</version>
   <description>NFT Worlds Wallet API</description>
   <url>nftworlds.com</url>
   <build>
